@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TJ-Sync 画面面板（渡幕）
 // @namespace    https://github.com/xunmeiruxue/TJ-Sync
-// @version      0.2.0
+// @version      0.2.1
 // @description  在渡幕（Trans-Jimaku Web）界面旁挂一块画面显示，跟随渡幕的播放头。不改动渡幕任何文件。
 // @author       YG
 // @match        http://127.0.0.1/*
@@ -175,10 +175,22 @@
 
     video.addEventListener('loadedmetadata', () => {
       ready = true;
+      fatal = '';
       video.currentTime = pendingSeek;
     });
     video.addEventListener('error', () => {
-      setStatus('视频无法播放（浏览器可能不支持该编码，试试 H.264 的 mp4）');
+      const e = video.error;
+      const codeText = {
+        1: '加载被中止',
+        2: '网络 / 读取错误',
+        3: '解码失败（编码可能不被浏览器支持）',
+        4: '源不被支持，或格式无法解析（也可能是页面策略阻止了媒体加载）',
+      }[e && e.code] || '未知错误';
+      fatal = `视频无法播放：${codeText}`;
+      setStatus(fatal, videoDetail());
+    });
+    video.addEventListener('stalled', () => {
+      if (!ready) setStatus('加载停滞…', videoDetail());
     });
   }
 
@@ -216,15 +228,40 @@
 
   let ready = false;
   let pendingSeek = 0;
+  let fatal = '';            // 致命错误：编码不支持、被页面策略拦等
+  let loadStartedAt = 0;
+  let lastProbe = '';        // blob 可读性探测结果
+
+  /** 用 fetch 读 blob 头部：区分"blob 本身有问题"和"media 加载被页面策略拦了" */
+  function probeBlob(url) {
+    lastProbe = '探测中…';
+    fetch(url, { headers: { Range: 'bytes=0-2047' } })
+      .then((r) => { lastProbe = `blob 可读（HTTP ${r.status}）`; })
+      .catch((e) => { lastProbe = `blob 读取失败：${(e && e.message) || e}`; });
+  }
+
+  function videoDetail() {
+    const e = video.error;
+    return [
+      `video.error = ${e ? `${e.code} ${e.message || ''}` : '无'}`,
+      `readyState = ${video.readyState}（4 = 可播放）`,
+      `networkState = ${video.networkState}`,
+      `blob 探测 = ${lastProbe || '(未探测)'}`,
+      `已等待 = ${loadStartedAt ? ((Date.now() - loadStartedAt) / 1000).toFixed(1) : '-'} s`,
+    ].join('\n');
+  }
 
   function attach(url, name) {
     ready = false;
+    fatal = '';
+    loadStartedAt = Date.now();
+    probeBlob(url);
     const a = audioEl();
     pendingSeek = a ? a.currentTime + offsetSeconds() : 0;
     video.src = url;
     body.classList.add('has-video');
     video.load();
-    setStatus(`已载入 ${name || '视频'}`);
+    setStatus(`已载入 ${name || '视频'}`, '正在加载元数据…');
   }
 
   /* ---------------------------------------------------------------- 6. 跟随 */
@@ -254,8 +291,19 @@
       setStatus('未选择视频', '点「选视频」或把 preview.mp4 拖进面板');
       return;
     }
+    if (fatal) {
+      setStatus(fatal, videoDetail());
+      return;
+    }
     if (!ready) {
-      setStatus('视频加载中…', '等待视频元数据');
+      // 不要每帧覆盖同一个短句：把等待时长和诊断带上，便于判断卡在哪
+      const waited = (Date.now() - loadStartedAt) / 1000;
+      setStatus(
+        `视频加载中… ${waited.toFixed(0)}s`,
+        waited >= 5
+          ? `${videoDetail()}\n\n超过 5 秒仍未就绪：编码不支持会走 error 分支提示；\n若既不报错也毫无进展，多半是页面策略（CSP）阻止了 blob 媒体加载。`
+          : videoDetail()
+      );
       return;
     }
 
